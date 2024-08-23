@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, request
 import aiomysql
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask_cors import CORS
 import aiohttp
 import asyncio
@@ -14,6 +14,7 @@ cache = Cache(app, config={'CACHE_TYPE': 'simple', 'CACHE_DEFAULT_TIMEOUT': 600}
 
 # 数据库连接信息
 db_config = {
+    # 'host': '111.173.89.238',
     'host': 'localhost',
     'user': 'yjj',
     'password': 'pass',
@@ -27,17 +28,58 @@ async def connect_db():
 
 async def fetch_count_data(session, session_id, car_id, start_time, end_time):
     try:
-        if not car_id:  # 检查 carId 是否为空
+        if car_id:  # 检查 carId 是否为空
+
+            async with session.get(
+                    f"http://121.37.154.193:9999/gps-web/api/get_gps_h.jsp?sessionId={session_id}&carId={car_id}&startTime={start_time}&endTime={end_time}",
+                    timeout=5
+            ) as response:
+                response.raise_for_status()
+                count_data = await response.json()
+                return count_data.get('countData', {})
+        else:
             return {}
-        async with session.get(
-                f"http://121.37.154.193:9999/gps-web/api/get_gps_h.jsp?sessionId={session_id}&carId={car_id}&startTime={start_time}&endTime={end_time}",
-                timeout=5
-        ) as response:
-            response.raise_for_status()
-            count_data = await response.json()
-            return count_data.get('countData', {})
+
     except Exception as e:
         print(f"Error fetching count data for car {car_id}: {e}")
+        return {}
+
+
+async def fetch_count_data_zt(session, license_plate, start_time, end_time):
+    try:
+        if license_plate:  # 检查 license_plate 是否为空
+
+            async with session.get(
+                    f"http://111.173.89.238:7203/info_report/v1/query_track_data?vehicleNo={license_plate}&startTime={start_time}&endTime={end_time}&curPage=1&pageNum=9999",
+                    timeout=5
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
+                if "dataList" not in data["data"]:
+                    return {}
+                data_list = data["data"]["dataList"]
+                if len(data_list) > 2:
+
+                    mile = round((data_list[-1]["deviceMileage"] - data_list[0]["deviceMileage"] )/ 1000,2)
+                    move_long = data_list[-1]['driveTimeLen'] if 'driveTimeLen' in data_list[-1] else 0
+
+                    hours, remainder = divmod(move_long, 3600)
+                    minutes, seconds = divmod(remainder, 60)
+                    formatted_time = ""
+                    if hours > 0:
+                        formatted_time += f"{hours}时"
+                    if minutes > 0:
+                        formatted_time += f"{minutes}分"
+                    formatted_time += f"{seconds}秒"
+                    move_long = formatted_time
+                    return {"mile": mile, "move_long": move_long}
+                else:
+                    return {}
+        else:
+            return {}
+
+    except Exception as e:
+        print(f"Error fetching count data for car {license_plate}: {e}")
         return {}
 
 
@@ -77,7 +119,7 @@ async def get_last_locations():
     async with aiohttp.ClientSession() as session:
         for vehicle in vehicles:
             vehicle_id, license_plate, car_id, vehicle_group, project_category, terminal_model, terminal_number, \
-            brand_model, vehicle_identification_number, engine_number, owner, vehicle_name, gross_weight, vehicle_type = vehicle
+                brand_model, vehicle_identification_number, engine_number, owner, vehicle_name, gross_weight, vehicle_type = vehicle
 
             # 查询当天是否有轨迹信息
             await cursor.execute("""
@@ -100,7 +142,13 @@ async def get_last_locations():
 
             # 如果carId存在，继续获取count_data
             if car_id:
-                count_data = await fetch_count_data(session, session_id, car_id, date.strftime('%Y%m%d000000'), date.strftime('%Y%m%d235959'))
+                count_data = await fetch_count_data(session, session_id, car_id, date.strftime('%Y%m%d000000'),
+                                                    date.strftime('%Y%m%d235959'))
+                move_long = count_data.get('move_long', 'N/A')
+                mile = count_data.get('mile', 'N/A')
+            elif project_category == "渣土项目":
+                count_data = await fetch_count_data_zt(session, license_plate, date.strftime('%Y-%m-%d 00:00:00'),
+                                                       date.strftime('%Y-%m-%d 23:59:59'))
                 move_long = count_data.get('move_long', 'N/A')
                 mile = count_data.get('mile', 'N/A')
             else:

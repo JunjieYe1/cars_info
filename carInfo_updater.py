@@ -6,6 +6,48 @@ import time
 import schedule
 import logging
 from dbutils.pooled_db import PooledDB
+import math
+
+# 判断是否在中国范围内
+def out_of_china(lng, lat):
+    if lng < 72.004 or lng > 137.8347:
+        return True
+    if lat < 0.8293 or lat > 55.8271:
+        return True
+    return False
+
+# 转换纬度
+def transform_lat(lng, lat):
+    ret = -100.0 + 2.0 * lng + 3.0 * lat + 0.2 * lat * lat + 0.1 * lng * lat + 0.2 * math.sqrt(abs(lng))
+    ret += (20.0 * math.sin(6.0 * lng * math.pi) + 20.0 * math.sin(2.0 * lng * math.pi)) * 2.0 / 3.0
+    ret += (20.0 * math.sin(lat * math.pi) + 40.0 * math.sin(lat / 3.0 * math.pi)) * 2.0 / 3.0
+    ret += (160.0 * math.sin(lat / 12.0 * math.pi) + 320 * math.sin(lat * math.pi / 30.0)) * 2.0 / 3.0
+    return ret
+
+# 转换经度
+def transform_lng(lng, lat):
+    ret = 300.0 + lng + 2.0 * lat + 0.1 * lng * lng + 0.1 * lng * lat + 0.1 * math.sqrt(abs(lng))
+    ret += (20.0 * math.sin(6.0 * lng * math.pi) + 20.0 * math.sin(2.0 * lng * math.pi)) * 2.0 / 3.0
+    ret += (20.0 * math.sin(lng * math.pi) + 40.0 * math.sin(lng / 3.0 * math.pi)) * 2.0 / 3.0
+    ret += (150.0 * math.sin(lng / 12.0 * math.pi) + 300.0 * math.sin(lng / 30.0 * math.pi)) * 2.0 / 3.0
+    return ret
+
+# WGS-84 转 GCJ-02
+def wgs84_to_gcj02(lng, lat):
+    if out_of_china(lng, lat):
+        return lng, lat
+    dlat = transform_lat(lng - 105.0, lat - 35.0)
+    dlng = transform_lng(lng - 105.0, lat - 35.0)
+    radlat = lat / 180.0 * math.pi
+    magic = math.sin(radlat)
+    magic = 1 - 0.00669342162296594323 * magic * magic
+    sqrtmagic = math.sqrt(magic)
+    dlat = (dlat * 180.0) / ((6335552.717000426 * magic) / (magic * sqrtmagic) * math.pi)
+    dlng = (dlng * 180.0) / (6378137.0 / sqrtmagic * math.cos(radlat) * math.pi)
+    mglat = lat + dlat
+    mglng = lng + dlng
+    return mglng, mglat
+
 
 # 配置日志
 logging.basicConfig(filename='vehicle_track.log', level=logging.INFO,
@@ -98,7 +140,7 @@ def process_old_interface(vehicles, cursor):
             last_time = None
             for entry in track_data:
                 track_time = datetime.strptime(entry['time'], '%Y-%m-%d %H:%M:%S')
-                if last_time is None or (track_time - last_time).total_seconds() >= 300:
+                if last_time is None or (track_time - last_time).total_seconds() >= 60:
                     optimized_data.append({
                         "vehicle_id": vehicle_id,
                         "latitude": float(entry['glat']),
@@ -151,12 +193,17 @@ def process_new_interface(vehicles, cursor):
                 track_data = response_data['data']['dataList']
                 last_time = None
                 for entry in track_data:
+                    wgs_lng = entry['longitude'] / 1000000.0
+                    wgs_lat = entry['latitude'] / 1000000.0
+
+                    gcj_lng, gcj_lat = wgs84_to_gcj02(wgs_lng, wgs_lat)
+
                     track_time = datetime.fromtimestamp(entry['time'])
                     if last_time is None or (track_time - last_time).total_seconds() >= 300:
                         optimized_data.append({
                             "vehicle_id": vehicle_id,
-                            "latitude": entry['latitude'] / 1000000.0,
-                            "longitude": entry['longitude'] / 1000000.0,
+                            "latitude": gcj_lat,
+                            "longitude": gcj_lng,
                             "track_time": track_time
                         })
                         last_time = track_time
