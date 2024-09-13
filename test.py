@@ -54,3 +54,7 @@ session.commit()
 
 # 关闭会话
 session.close()
+
+
+# SELECT user, host FROM mysql.user;
+# UPDATE mysql.user SET host = '115.198.61.254' WHERE user = 'yjj' AND host = '125.121.179.157'; FLUSH PRIVILEGES;SELECT user, host FROM mysql.user;
