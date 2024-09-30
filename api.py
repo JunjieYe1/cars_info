@@ -27,202 +27,9 @@ async def connect_db():
     return await aiomysql.connect(**db_config)
 
 
-async def fetch_count_data(session, session_id, car_id, start_time, end_time):
-    try:
-        if car_id:
-            async with session.get(
-                f"http://121.37.154.193:9999/gps-web/api/get_gps_h.jsp?sessionId={session_id}&carId={car_id}&startTime={start_time}&endTime={end_time}",
-                timeout=5
-            ) as response:
-                response.raise_for_status()
-                count_data = await response.json()
-                return count_data.get('countData', {})
-        else:
-            return {}
-    except Exception as e:
-        print(f"Error fetching count data for car {car_id}: {e}")
-        return {}
-
-async def fetch_sanitation_status(session, session_id):
-    try:
-        async with session.get(
-            f"http://121.37.154.193:9999/gps-web/api/get_gps_r.jsp?sessionId={session_id}",
-            timeout=5
-        ) as response:
-            response.raise_for_status()
-            # 注意：某些情况下，响应的Content-Type可能不正确，因此指定content_type=None
-            text = await response.text()
-            data = json.loads(text)
-            return data.get('list', [])
-    except Exception as e:
-        print(f"Error fetching sanitation data: {e}")
-        return []
-
-def map_status_code(alarmType):
-    # 将字符串类型的alarmType转换为整数
-    alarmType = int(alarmType)
-    if alarmType in [1, 2, 3, 4]:
-        return 0  # 离线
-    elif alarmType in [9, 10, 11, 12, 5, 6]:
-        return 1  # 在线 - 停车
-    elif alarmType in [7, 8]:
-        return 2  # 在线 - 行驶
-    elif alarmType == 13:
-        return 3  # 在线 - 熄火
-    else:
-        return -1  # 未知状态
-
-
-# 添加新的函数来获取老城区环卫车辆的状态数据
-async def fetch_status_data_old_urban(session, session_id):
-    try:
-        async with session.get(
-            f"http://121.37.154.193:9999/gps-web/api/get_gps_r.jsp?sessionId={session_id}",
-            timeout=5
-        ) as response:
-            response.raise_for_status()
-            data = await response.json()
-            vehicle_status_dict = {}
-            if 'list' in data:
-                for vehicle in data['list']:
-                    carId = vehicle.get('carId')
-                    alarmType = vehicle.get('state')
-                    if carId and alarmType:
-                        # 将报警类型编码转换为精简的状态编码
-                        simplified_status = map_status_code(alarmType)
-                        vehicle_status_dict[str(carId)] = simplified_status
-            return vehicle_status_dict
-    except Exception as e:
-        print(f"Error fetching status data: {e}")
-        return {}
-
-
-async def fetch_count_data_zt(session, license_plate, start_time, end_time):
-    try:
-        if license_plate:
-            async with session.get(
-                f"http://111.173.89.238:7203/info_report/v1/query_track_data?vehicleNo={license_plate}&startTime={start_time}&endTime={end_time}&curPage=1&pageNum=9999",
-                timeout=5
-            ) as response:
-                response.raise_for_status()
-                data = await response.json()
-                if "dataList" not in data["data"]:
-                    return {}
-                data_list = data["data"]["dataList"]
-                if len(data_list) > 2:
-                    mile = round((data_list[-1]["deviceMileage"] - data_list[0]["deviceMileage"]) / 1000, 2)
-                    move_long = data_list[-1]['driveTimeLen'] if 'driveTimeLen' in data_list[-1] else 0
-                    hours, remainder = divmod(move_long, 3600)
-                    minutes, seconds = divmod(remainder, 60)
-                    formatted_time = ""
-                    if hours > 0:
-                        formatted_time += f"{hours}时"
-                    if minutes > 0:
-                        formatted_time += f"{minutes}分"
-                    formatted_time += f"{seconds}秒"
-                    move_long = formatted_time
-                    return {"mile": mile, "move_long": move_long}
-                else:
-                    return {}
-        else:
-            return {}
-    except Exception as e:
-        print(f"Error fetching count data for car {license_plate}: {e}")
-        return {}
-
-
-async def fetch_count_data_new_urban(session, license_plate, start_time, end_time):
-    try:
-        if license_plate:
-            async with session.post(
-                "http://220.178.1.18:8542/GPSBaseserver/stdHisAlarm/getHisGPS.do",
-                json={
-                    "beginTime": start_time,
-                    "endTime": end_time,
-                    "vehicleNum": license_plate,
-                    "sessionId": "57c7ccea-5e8c-493a-8ac8-db8598deadac-02333474"
-                },
-                timeout=10
-            ) as response:
-                response.raise_for_status()
-                data = await response.json()
-                if data['resultCode'] == 0 and data['data']:
-                    data_list = data['data']
-                    if len(data_list) > 2:
-                        first_mileage = data_list[0]["mileage"]
-                        last_mileage = data_list[-1]["mileage"]
-                        mile = round((last_mileage - first_mileage) / 1000, 1)
-                        return {"mile": mile}
-                return {"mile": 0.0}
-        else:
-            return {"mile": 0.0}
-    except Exception as e:
-        print(f"Error fetching data for car {license_plate}: {e}")
-        return {"mile": 0.0}
-
-
-async def fetch_status_data_new_urban(session, session_id):
-    try:
-        async with session.post(
-            "http://220.178.1.18:8542/GPSBaseserver/stdHisAlarm/getGPS.do",
-            json={
-                "sessionId": session_id
-            },
-            timeout=10
-        ) as response:
-            response.raise_for_status()
-            data = await response.json()
-            vehicle_status_dict = {}
-            if data['resultCode'] == 0 and 'data' in data:
-                for vehicle in data['data']:
-                    vehicleNum = vehicle.get('vehicleNum')  # 车牌号
-                    gpsTimeStr = vehicle.get('gpsTime')     # GPS时间
-                    stateStr = vehicle.get('stateStr')      # 状态字符串
-                    speed = vehicle.get('speed', 0)         # 速度，默认为0
-                    gpsTime = datetime.strptime(gpsTimeStr, '%Y-%m-%d %H:%M:%S') if gpsTimeStr else None
-
-                    # 判断是否在线
-                    if gpsTime and gpsTime.date() == datetime.now().date():
-                        # 在线，解析状态
-                        status = parse_new_urban_status(stateStr, speed)
-                    else:
-                        status = 0  # 离线
-
-                    # 保存状态
-                    if vehicleNum:
-                        vehicle_status_dict[vehicleNum] = status
-            return vehicle_status_dict
-    except Exception as e:
-        print(f"Error fetching new urban status data: {e}")
-        return {}
-
-
-def parse_new_urban_status(stateStr, speed):
-    # 默认状态为未知
-    status = -1
-    if not stateStr:
-        return status
-
-    # 提取第一个状态
-    first_state = stateStr.split(',')[0]
-
-    if first_state == "车辆点火":
-        if speed > 0:
-            status = 2  # 行驶
-        else:
-            status = 1  # 停车
-    elif first_state == "车辆熄火":
-        status = 3  # 熄火
-    else:
-        status = -1  # 未知状态
-
-    return status
-
-
 def make_cache_key():
     date_str = request.args.get('date', 'default')
     return f"{request.path}?date={date_str}"
-
 
 @app.route('/api/last_locations', methods=['GET'])
 @cache.cached(timeout=600, key_prefix=make_cache_key)
@@ -232,92 +39,73 @@ async def get_last_locations():
         return jsonify({"error": "Date parameter is required"}), 400
 
     try:
-        date = datetime.strptime(date_str, '%Y%m%d')
+        date = datetime.strptime(date_str, '%Y%m%d').date()
     except ValueError:
-        return jsonify({"error": "Invalid date format"}), 400
+        return jsonify({"error": "Invalid date format, expected YYYYMMDD"}), 400
 
     connection = await connect_db()
     cursor = await connection.cursor()
 
-    # 查询所有车辆信息
-    await cursor.execute("""
-        SELECT 
-            id, license_plate, carId, vehicle_group, project_category, terminal_model, terminal_number,
-            brand_model, vehicle_identification_number, engine_number, owner, vehicle_name, gross_weight, vehicle_type, driver
-        FROM VehicleInfo
-    """)
-    vehicles = await cursor.fetchall()
+    try:
+        # 查询所有车辆信息
+        await cursor.execute("""
+            SELECT 
+                id, license_plate, carId, vehicle_group, project_category, terminal_model, terminal_number,
+                brand_model, vehicle_identification_number, engine_number, owner, vehicle_name, gross_weight, vehicle_type, driver
+            FROM VehicleInfo
+        """)
+        vehicles = await cursor.fetchall()
 
-    # 定义session_id
-    session_id = "sNRkJpZXYwF2dmdmdmgCQmNlYIN3S1Nnawhic3kWNPNjZ5JWYeFWepZCZxpnch9VYf1mYmVmdkFXby9FRfNFNvJDawEXeY"
-        # 新城区项目的session_id
-    session_id_new_urban = "57c7ccea-5e8c-493a-8ac8-db8598deadac-02333474"
+        if not vehicles:
+            return jsonify({"error": "No vehicles found"}), 404
 
-    # 使用aiohttp的ClientSession
-    async with aiohttp.ClientSession() as session:
-        # 获取老城区环卫车辆的状态数据
-        status_data_old_urban = await fetch_status_data_old_urban(session, session_id)
-        # 获取新城区项目车辆的状态数据
-        status_data_new_urban = await fetch_status_data_new_urban(session, session_id_new_urban)
+        vehicle_ids = [vehicle[0] for vehicle in vehicles]
 
-        status_data = {**status_data_old_urban, **status_data_new_urban}
-        # 定义一个异步任务来并发处理车辆数据
-        tasks = [handle_vehicle_data(vehicle, session_id, date, session, status_data) for vehicle in vehicles]
+        # 构建IN查询的占位符
+        in_placeholders = ','.join(['%s'] * len(vehicle_ids))
 
-        # 并发执行所有车辆数据的获取任务
+        # 查询vehicle_daily_data表中的数据
+        await cursor.execute(f"""
+            SELECT vehicle_id, running_mileage, driving_duration, parking_duration, engine_off_duration, current_status
+            FROM vehicle_daily_data
+            WHERE vehicle_id IN ({in_placeholders}) AND date = %s
+        """, (*vehicle_ids, date))
+        daily_data = await cursor.fetchall()
+
+        # 构建vehicle_id到daily_data的映射
+        daily_data_dict = {row[0]: {
+            'running_mileage': float(row[1]),
+            'driving_duration': row[2],
+            'parking_duration': row[3],
+            'engine_off_duration': row[4],
+            'current_status': row[5]
+        } for row in daily_data}
+
+        # 创建异步任务处理每辆车的数据
+        tasks = [handle_vehicle_data(vehicle, daily_data_dict.get(vehicle[0])) for vehicle in vehicles]
         results = await asyncio.gather(*tasks)
 
-    await cursor.close()
-    connection.close()
+    except Exception as e:
+        print(f"Error in get_last_locations: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+    finally:
+        await cursor.close()
+        connection.close()
 
     return jsonify(results)
 
 
 # 处理单个车辆数据的异步函数
-async def handle_vehicle_data(vehicle, session_id, date, session, status_data):
+async def handle_vehicle_data(vehicle, daily_data):
     vehicle_id, license_plate, car_id, vehicle_group, project_category, terminal_model, terminal_number, \
         brand_model, vehicle_identification_number, engine_number, owner, vehicle_name, gross_weight, vehicle_type, driver = vehicle
 
-    # 查询当天是否有轨迹信息
-    track = await fetch_track_info(vehicle_id, date)
+    # 获取当天最后的轨迹信息
+    track = await fetch_track_info(vehicle_id, daily_data)
 
-    # 初始化状态信息
-    status, latitude, longitude, last_time = process_track_info(track)
-
-    move_long = 'N/A'
-    mile = 'N/A'
-
-    # 根据不同项目类别获取对应的轨迹数据
-    if car_id:
-        count_data = await fetch_count_data(session, session_id, car_id, date.strftime('%Y%m%d000000'),
-                                            date.strftime('%Y%m%d235959'))
-        move_long = count_data.get('move_long', 'N/A')
-        mile = count_data.get('mile', 'N/A')
-    elif project_category == "渣土项目":
-        count_data = await fetch_count_data_zt(session, license_plate, date.strftime('%Y-%m-%d 00:00:00'),
-                                               date.strftime('%Y-%m-%d 23:59:59'))
-        move_long = count_data.get('move_long', 'N/A')
-        mile = count_data.get('mile', 'N/A')
-    elif project_category == "新城区项目":
-        count_data = await fetch_count_data_new_urban(session, license_plate, date.strftime('%Y-%m-%d 00:00:00'),
-                                                      date.strftime('%Y-%m-%d 23:59:59'))
-        mile = count_data.get('mile', 'N/A')
-
-    # 更新老城区环卫车辆的状态信息
-    if project_category == "老城区环卫" and car_id:
-        if str(car_id) in status_data:
-            status = status_data[str(car_id)]
-        else:
-            status = -1  # 未知状态
-
-    # 更新新城区项目车辆的状态信息
-    if project_category == "新城区项目" and license_plate:
-        if license_plate in status_data:
-            status = status_data[license_plate]
-        else:
-            status = -1  # 未知状态
-
-    return {
+    # 初始化返回数据
+    result = {
         'id': vehicle_id,
         'license_plate': license_plate,
         'carId': car_id,
@@ -325,12 +113,13 @@ async def handle_vehicle_data(vehicle, session_id, date, session, status_data):
         'project_category': project_category,
         'terminal_model': terminal_model,
         'terminal_number': terminal_number,
-        'status': status,
-        'latitude': latitude,
-        'longitude': longitude,
-        'last_time': last_time,
-        'move_long': move_long,
-        'mile': mile,
+        'status': daily_data['current_status'] if daily_data else 0,
+        'latitude': track['latitude'],
+        'longitude': track['longitude'],
+        'last_time': track['last_time'],
+        'move_long': format_duration(daily_data['driving_duration']) if daily_data else 'N/A',
+        'move_long_num': daily_data['driving_duration'] if daily_data else 'N/A',
+        'mile': daily_data['running_mileage'] if daily_data else 'N/A',
         'brand_model': brand_model,
         'vehicle_identification_number': vehicle_identification_number,
         'engine_number': engine_number,
@@ -341,27 +130,54 @@ async def handle_vehicle_data(vehicle, session_id, date, session, status_data):
         'driver': driver
     }
 
+    return result
 
-
-
-
-
-
+# 格式化持续时间为 "HH时MM分SS秒"
+def format_duration(seconds):
+    if not isinstance(seconds, int):
+        return 'N/A'
+    hours, remainder = divmod(seconds, 3600)
+    minutes, sec = divmod(remainder, 60)
+    formatted = ""
+    if hours > 0:
+        formatted += f"{hours}时"
+    if minutes > 0:
+        formatted += f"{minutes}分"
+    formatted += f"{sec}秒"
+    return formatted
 
 # Fetch track info separately to avoid sharing the cursor concurrently
-async def fetch_track_info(vehicle_id, date):
+async def fetch_track_info(vehicle_id, daily_data):
+    if not daily_data:
+        return {'latitude': None, 'longitude': None, 'last_time': None}
+
     connection = await connect_db()
-    async with connection.cursor() as cursor:
+    cursor = await connection.cursor()
+    try:
         await cursor.execute("""
-                    SELECT latitude, longitude, track_time
-                    FROM VehicleTrack
-                    WHERE vehicle_id = %s AND DATE(track_time) = %s
-                    ORDER BY track_time DESC
-                    LIMIT 1
-                """, (vehicle_id, date))
+            SELECT latitude, longitude, track_time
+            FROM VehicleTrack
+            WHERE vehicle_id = %s AND DATE(track_time) = %s
+            ORDER BY track_time DESC
+            LIMIT 1
+        """, (vehicle_id, daily_data['date'] if 'date' in daily_data else datetime.now().date()))
         track = await cursor.fetchone()
-    connection.close()  # Remove await here as connection.close() is synchronous
-    return track
+    except Exception as e:
+        print(f"Error fetching track info for vehicle {vehicle_id}: {e}")
+        track = None
+    finally:
+        await cursor.close()
+        connection.close()
+
+    if track:
+        latitude, longitude, track_time = track
+        return {
+            'latitude': latitude,
+            'longitude': longitude,
+            'last_time': track_time.strftime('%Y-%m-%d %H:%M:%S') if track_time else None
+        }
+    else:
+        return {'latitude': None, 'longitude': None, 'last_time': None}
 
 
 # Process track information to separate data logic
@@ -519,6 +335,90 @@ async def get_video_url():
     except Exception as e:
         print(f"Error fetching video URLs for vehicle {vehicle_num}: {e}")
         return jsonify({"error": "Failed to fetch video URLs"}), 500
+
+
+# 新增接口：/api/historical_data
+@app.route('/api/historical_data', methods=['GET'])
+async def get_historical_data():
+    # 获取查询参数
+    start_date_str = request.args.get('startDate')
+    end_date_str = request.args.get('endDate')
+    companies_str = request.args.get('companies')
+
+    # 验证参数是否存在
+    if not start_date_str or not end_date_str or not companies_str:
+        return jsonify({"error": "startDate, endDate, and companies parameters are required"}), 400
+
+    # 解析日期
+    try:
+        start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
+        end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({"error": "Invalid date format, expected YYYY-MM-DD"}), 400
+
+    if start_date > end_date:
+        return jsonify({"error": "startDate cannot be after endDate"}), 400
+
+    # 解析companies
+    companies = [company.strip() for company in companies_str.split(',') if company.strip()]
+    if not companies:
+        return jsonify({"error": "At least one company must be specified"}), 400
+
+    connection = await connect_db()
+    cursor = await connection.cursor()
+
+    try:
+        # 使用单个SQL查询进行JOIN和聚合
+        # 查询 VehicleInfo 和 vehicle_daily_data，通过 project_category 过滤，并在日期范围内聚合
+        # 结果按 license_plate 和 project_category 分组
+
+        # 构建IN查询的占位符
+        company_placeholders = ','.join(['%s'] * len(companies))
+
+        query = f"""
+            SELECT 
+                vi.license_plate, 
+                vi.project_category, 
+                SUM(vdd.running_mileage) AS total_running_mileage,
+                SUM(vdd.driving_duration) AS total_driving_duration,
+                SUM(vdd.parking_duration) AS total_parking_duration,
+                SUM(vdd.engine_off_duration) AS total_engine_off_duration
+            FROM VehicleInfo vi
+            JOIN vehicle_daily_data vdd ON vi.id = vdd.vehicle_id
+            WHERE vi.project_category IN ({company_placeholders})
+              AND vdd.date BETWEEN %s AND %s
+            GROUP BY vi.license_plate, vi.project_category
+            ORDER BY vi.license_plate, vi.project_category
+        """
+
+        params = (*companies, start_date, end_date)
+
+        await cursor.execute(query, params)
+        results = await cursor.fetchall()
+
+        # 构建响应数据
+        historical_data = []
+        for row in results:
+            license_plate, project_category, running_mileage, driving_duration, parking_duration, engine_off_duration = row
+            historical_data.append({
+                'license_plate': license_plate,
+                'project_category': project_category,
+                'running_mileage': float(running_mileage) if running_mileage else 0.0,
+                'driving_duration': int(driving_duration) if driving_duration else 0,
+                'parking_duration': int(parking_duration) if parking_duration else 0,
+                'engine_off_duration': int(engine_off_duration) if engine_off_duration else 0
+            })
+
+    except Exception as e:
+        print(f"Error in get_historical_data: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+    finally:
+        await cursor.close()
+        connection.close()
+
+    return jsonify(historical_data)
+
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=8011)
