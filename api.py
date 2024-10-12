@@ -6,21 +6,28 @@ import aiohttp
 import asyncio
 from flask_caching import Cache
 import json
+import threading
+from database_updater import main as start_all_trackers
+from vehicle_tracker import VehicleTracker
+from config import DB_CONFIG
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 # 配置缓存
-cache = Cache(app, config={'CACHE_TYPE': 'simple', 'CACHE_DEFAULT_TIMEOUT': 600})
+cache = Cache(app, config={'CACHE_TYPE': 'simple', 'CACHE_DEFAULT_TIMEOUT': 10})
 
 # 数据库连接信息
-db_config = {
-    # 'host': '111.173.89.238',
-    'host': 'localhost',
-    'user': 'yjj',
-    'password': 'pass',
-    'db': 'Cars'
-}
+if DB_CONFIG:
+    db_config = DB_CONFIG
+else:
+    db_config = {
+        # 'host': '111.173.89.238',
+        'host': 'localhost',
+        'user': 'yjj',
+        'password': 'pass',
+        'db': 'Cars'
+    }
 
 
 async def connect_db():
@@ -31,10 +38,17 @@ def make_cache_key():
     date_str = request.args.get('date', 'default')
     return f"{request.path}?date={date_str}"
 
+
+# 实例化 VehicleTracker
+vehicle_tracker = VehicleTracker(loop_interval=5)  # 根据需要调整循环间隔时间
+
+
 @app.route('/api/last_locations', methods=['GET'])
-@cache.cached(timeout=600, key_prefix=make_cache_key)
+@cache.cached(timeout=5, key_prefix=make_cache_key)
 async def get_last_locations():
     date_str = request.args.get('date')
+    license_plate = request.args.get('license_plate')
+
     if not date_str:
         return jsonify({"error": "Date parameter is required"}), 400
 
@@ -42,6 +56,15 @@ async def get_last_locations():
         date = datetime.strptime(date_str, '%Y%m%d').date()
     except ValueError:
         return jsonify({"error": "Invalid date format, expected YYYYMMDD"}), 400
+
+    # 如果提供了车牌号，调用 VehicleTracker 来更新该车辆的轨迹
+    if license_plate:
+        try:
+            # 使用 asyncio.to_thread 来在后台线程中运行同步方法
+            await asyncio.to_thread(vehicle_tracker.fetch_track_by_license_plate, license_plate)
+            print(f"Successfully updated track for license plate: {license_plate}")
+        except Exception as e:
+            print(f"Error updating track for license plate {license_plate}: {e}")
 
     connection = await connect_db()
     cursor = await connection.cursor()
@@ -51,7 +74,8 @@ async def get_last_locations():
         await cursor.execute("""
             SELECT 
                 id, license_plate, carId, vehicle_group, project_category, terminal_model, terminal_number,
-                brand_model, vehicle_identification_number, engine_number, owner, vehicle_name, gross_weight, vehicle_type, driver
+                brand_model, vehicle_identification_number, engine_number, owner, vehicle_name, gross_weight, 
+                vehicle_type, driver, driver_phone
             FROM VehicleInfo
         """)
         vehicles = await cursor.fetchall()
@@ -98,8 +122,9 @@ async def get_last_locations():
 
 # 处理单个车辆数据的异步函数
 async def handle_vehicle_data(vehicle, daily_data):
-    vehicle_id, license_plate, car_id, vehicle_group, project_category, terminal_model, terminal_number, \
-        brand_model, vehicle_identification_number, engine_number, owner, vehicle_name, gross_weight, vehicle_type, driver = vehicle
+    (vehicle_id, license_plate, car_id, vehicle_group, project_category, terminal_model, terminal_number, \
+        brand_model, vehicle_identification_number, engine_number, owner, vehicle_name, gross_weight, vehicle_type,
+     driver, driver_phone) = vehicle
 
     # 获取当天最后的轨迹信息
     track = await fetch_track_info(vehicle_id, daily_data)
@@ -113,7 +138,7 @@ async def handle_vehicle_data(vehicle, daily_data):
         'project_category': project_category,
         'terminal_model': terminal_model,
         'terminal_number': terminal_number,
-        'status': daily_data['current_status'] if daily_data else 0,
+        'status': daily_data['current_status'] if daily_data and daily_data['current_status'] > 0 else 0,
         'latitude': track['latitude'],
         'longitude': track['longitude'],
         'last_time': track['last_time'],
@@ -127,10 +152,12 @@ async def handle_vehicle_data(vehicle, daily_data):
         'vehicle_name': vehicle_name,
         'gross_weight': gross_weight,
         'vehicle_type': vehicle_type,
-        'driver': driver
+        'driver': driver,
+        'driver_phone': driver_phone,
     }
 
     return result
+
 
 # 格式化持续时间为 "HH时MM分SS秒"
 def format_duration(seconds):
@@ -145,6 +172,7 @@ def format_duration(seconds):
         formatted += f"{minutes}分"
     formatted += f"{sec}秒"
     return formatted
+
 
 # Fetch track info separately to avoid sharing the cursor concurrently
 async def fetch_track_info(vehicle_id, daily_data):
@@ -193,6 +221,7 @@ def process_track_info(track):
         longitude = None
         last_time = None
     return status, latitude, longitude, last_time
+
 
 @app.route('/api/vehicle_tracks', methods=['GET'])
 async def get_vehicle_tracks():
@@ -265,7 +294,6 @@ async def save_fence():
         connection.close()
 
 
-
 @app.route('/api/get_fences', methods=['GET'])
 async def get_fences():
     connection = await connect_db()
@@ -300,7 +328,8 @@ async def get_fences():
                 'order': point_order
             })
 
-        response = [{'id': fence_id, 'name': fence['name'], 'points': fence['points']} for fence_id, fence in fences.items()]
+        response = [{'id': fence_id, 'name': fence['name'], 'points': fence['points']} for fence_id, fence in
+                    fences.items()]
         return jsonify(response)
 
     except Exception as e:
@@ -310,6 +339,7 @@ async def get_fences():
     finally:
         await cursor.close()
         connection.close()
+
 
 @app.route('/api/get_video_url', methods=['POST'])
 async def get_video_url():
@@ -321,13 +351,13 @@ async def get_video_url():
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                'http://220.178.1.18:8542/GPSBaseserver/videoUrlProvider/getVideoUrl.do',
-                json={
-                    "userName": "ahhygs",
-                    "password": "123456",
-                    "vehicleNum": vehicle_num,
-                    "sessionId": "57c7ccea-5e8c-493a-8ac8-db8598deadac-02333474"
-                }
+                    'http://220.178.1.18:8542/GPSBaseserver/videoUrlProvider/getVideoUrl.do',
+                    json={
+                        "userName": "ahhygs",
+                        "password": "123456",
+                        "vehicleNum": vehicle_num,
+                        "sessionId": "57c7ccea-5e8c-493a-8ac8-db8598deadac-02333474"
+                    }
             ) as response:
                 response.raise_for_status()
                 result = await response.json()
@@ -379,19 +409,21 @@ async def get_historical_data():
             SELECT 
                 vi.license_plate, 
                 vi.project_category, 
-                SUM(vdd.running_mileage) AS total_running_mileage,
-                SUM(vdd.driving_duration) AS total_driving_duration,
-                SUM(vdd.parking_duration) AS total_parking_duration,
-                SUM(vdd.engine_off_duration) AS total_engine_off_duration
-            FROM VehicleInfo vi
-            JOIN vehicle_daily_data vdd ON vi.id = vdd.vehicle_id
+                COALESCE(SUM(vdd.running_mileage), 0) AS total_running_mileage,
+                COALESCE(SUM(vdd.driving_duration), 0) AS total_driving_duration,
+                COALESCE(SUM(vdd.parking_duration), 0) AS total_parking_duration,
+                COALESCE(SUM(vdd.engine_off_duration), 0) AS total_engine_off_duration
+            FROM vehicleinfo vi
+            LEFT JOIN vehicle_daily_data vdd 
+                ON vi.id = vdd.vehicle_id 
+                AND vdd.date BETWEEN %s AND %s
             WHERE vi.project_category IN ({company_placeholders})
-              AND vdd.date BETWEEN %s AND %s
             GROUP BY vi.license_plate, vi.project_category
             ORDER BY vi.license_plate, vi.project_category
         """
 
-        params = (*companies, start_date, end_date)
+
+        params = (start_date, end_date, *companies)
 
         await cursor.execute(query, params)
         results = await cursor.fetchall()
@@ -421,4 +453,9 @@ async def get_historical_data():
 
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=8011)
+    # 启动数据库更新器（跟踪器）线程
+    tracker_thread = threading.Thread(target=start_all_trackers)
+    tracker_thread.start()
+
+    # 启动 API 服务
+    app.run(debug=False, host='0.0.0.0', port=8011)

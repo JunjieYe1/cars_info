@@ -281,13 +281,19 @@ class DailyDataTracker:
             mile = self.safe_convert(count_data.get('mile', '0.0'), float, 0.0)
             driving_duration = self.safe_convert(count_data.get('move_long_num', '0'), int, 0)
             parking_duration = self.safe_convert(count_data.get('stop_long_num', '0'), int, 0)
-
             # 检查数据有效性
             if mile < 0 or driving_duration < 0 or parking_duration < 0:
                 data_valid = False
-
             # 获取状态
             status = status_data.get(str(car_id), -1)
+
+        elif project_category == "老城区环卫" and not car_id:
+            # 处理老城区环卫项目 新接口
+            mile = self.safe_convert(count_data.get('mile', '0.0'), float, 0.0)
+            driving_duration = self.safe_convert(count_data.get('move_long', 0), int, 0)
+
+            # 根据 mile 设置状态
+            status = 1 if mile > 0 else 0
 
         elif project_category == "渣土项目" and license_plate:
             # 处理渣土项目
@@ -299,7 +305,7 @@ class DailyDataTracker:
 
         elif project_category == "新城区项目" and license_plate:
             # 处理新城区项目
-            mile = self.safe_convert(count_data.get('mile', '0.0'), float, 0.0)
+            mile = self.safe_convert(count_data.get('mile', '0.0'), float, 0.0)/10
             driving_duration = self.safe_convert(count_data.get('move_long', 0), int, 0)
             parking_duration = self.safe_convert(count_data.get('stop_long', 0), int, 0)
             engine_off_duration = self.safe_convert(count_data.get('engine_off_long', 0), int, 0)
@@ -360,6 +366,10 @@ class DailyDataTracker:
                         tasks.append(
                             self.fetch_count_data_old_urban(session, SESSION_ID_OLD_URBAN, car_id, start_time_str, end_time_str)
                         )
+                    elif not car_id and project_category == "老城区环卫":
+                        tasks.append(
+                            self.fetch_count_data_zt(session, license_plate, start_time_iso, end_time_iso)
+                        )
                     elif project_category == "渣土项目":
                         tasks.append(
                             self.fetch_count_data_zt(session, license_plate, start_time_iso, end_time_iso)
@@ -377,11 +387,12 @@ class DailyDataTracker:
                 # 处理每辆车的数据
                 for vehicle, count_data in zip(vehicles, count_results):
                     if not count_data:
-                        self.logger.info(f"No count data for vehicle: {vehicle[1]}")
+                        # self.logger.info(f"No count data for vehicle: {vehicle[1]}")
                         continue
 
                     processed_data = await self.process_vehicle_data(vehicle, count_data, status_data, today)
                     if processed_data:
+                        # print(processed_data)
                         daily_data.append(processed_data)
 
                 # 插入数据到数据库

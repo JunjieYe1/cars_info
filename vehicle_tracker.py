@@ -13,7 +13,7 @@ from config import DB_CONFIG, SESSION_ID_OLD_URBAN, API_URLS, LOG_FILE_TRACKER
 
 class VehicleTracker:
     def __init__(self, loop_interval=5):
-        self.data_interval = 10
+        self.data_interval = 1
         self.loop_interval = loop_interval  # 循环间隔时间（分钟）
 
         # 创建日志记录器
@@ -128,6 +128,12 @@ class VehicleTracker:
             old_vehicles = cursor.fetchall()
             self.process_old_interface(old_vehicles, cursor)
 
+            # 处理老城区环卫车辆（新接口）复用渣土处理函数
+            cursor.execute(
+                "SELECT id, license_plate FROM VehicleInfo WHERE project_category = '老城区环卫' AND carId IS NULL")
+            old_vehicles = cursor.fetchall()
+            self.process_new_interface(old_vehicles, cursor)
+
             # 处理渣土项目车辆（新接口）
             cursor.execute("SELECT id, license_plate FROM VehicleInfo WHERE project_category = '渣土项目'")
             new_vehicles = cursor.fetchall()
@@ -156,8 +162,13 @@ class VehicleTracker:
                 continue
 
             last_update_time = self.get_last_update_time(cursor, vehicle_id)
-            start_time = last_update_time if last_update_time and datetime.now() - last_update_time < timedelta(days=2) else datetime.now() - timedelta(days=1)
-            end_time = datetime.now()
+            if last_update_time and datetime.now() - last_update_time < timedelta(days=2):
+                start_time = last_update_time + timedelta(seconds=1)
+            else:
+                start_time = datetime.now() - timedelta(days=1)
+
+            end_time = datetime.now() + timedelta(seconds=1)
+
             start_time_str = start_time.strftime('%Y%m%d%H%M%S')
             end_time_str = end_time.strftime('%Y%m%d%H%M%S')
 
@@ -209,8 +220,12 @@ class VehicleTracker:
             vehicle_id, license_plate = vehicle
 
             last_update_time = self.get_last_update_time(cursor, vehicle_id)
-            start_time = last_update_time if last_update_time and datetime.now() - last_update_time < timedelta(days=2) else datetime.now() - timedelta(days=1)
-            end_time = datetime.now()
+            if last_update_time and datetime.now() - last_update_time < timedelta(days=2):
+                start_time = last_update_time + timedelta(seconds=1)
+            else:
+                start_time = datetime.now() - timedelta(days=1)
+
+            end_time = datetime.now() + timedelta(seconds=1)
 
             params = {
                 "startTime": start_time.strftime('%Y-%m-%d %H:%M:%S'),
@@ -269,8 +284,12 @@ class VehicleTracker:
             vehicle_id, license_plate = vehicle
 
             last_update_time = self.get_last_update_time(cursor, vehicle_id)
-            start_time = last_update_time if last_update_time and datetime.now() - last_update_time < timedelta(days=2) else datetime.now() - timedelta(days=1)
-            end_time = datetime.now()
+            if last_update_time and datetime.now() - last_update_time < timedelta(days=2):
+                start_time = last_update_time + timedelta(seconds=1)
+            else:
+                start_time = datetime.now() - timedelta(days=1)
+
+            end_time = datetime.now() + timedelta(seconds=1)
 
             # 如果开始时间和结束时间不在同一个月内，调整开始时间为结束时间所在月的月初
             if start_time.month != end_time.month:
@@ -292,7 +311,7 @@ class VehicleTracker:
                     last_time = None
                     for entry in track_data:
                         track_time = datetime.strptime(entry['gpsTime'], '%Y-%m-%d %H:%M:%S')
-                        if last_time is None or (track_time - last_time).total_seconds() >= 60:
+                        if last_time is None or (track_time - last_time).total_seconds() >= self.data_interval:
                             gcj_lng, gcj_lat = self.wgs84_to_gcj02(float(entry['lon']), float(entry['lat']))
                             optimized_data.append({
                                 "vehicle_id": vehicle_id,
@@ -333,3 +352,49 @@ class VehicleTracker:
                 time.sleep(1)
         except KeyboardInterrupt:
             logging.info("程序终止")
+
+    def fetch_track_by_license_plate(self, license_plate):
+        """
+        根据单一车牌号查询车辆轨迹并更新数据库。
+
+        :param license_plate: 车辆的车牌号。
+        """
+        connection = self.pool.connection()
+        cursor = connection.cursor()
+        try:
+            # 根据车牌号查找车辆信息
+            cursor.execute(
+                "SELECT id, project_category, carId, license_plate FROM VehicleInfo WHERE license_plate = %s",
+                (license_plate,)
+            )
+            vehicle = cursor.fetchone()
+            if not vehicle:
+                self.logger.warning(f"没有找到车牌号为 {license_plate} 的车辆信息。")
+                return
+
+            vehicle_id, project_category, car_id, license_plate = vehicle
+
+            # 根据项目类别选择处理函数
+            if project_category == '老城区环卫':
+                if car_id:
+                    vehicles = [(vehicle_id, car_id)]
+                    self.process_old_interface(vehicles, cursor)
+                else:
+                    vehicles = [(vehicle_id, license_plate)]
+                    self.process_new_interface(vehicles, cursor)
+            elif project_category == '渣土项目':
+                vehicles = [(vehicle_id, license_plate)]
+                self.process_new_interface(vehicles, cursor)
+            elif project_category == '新城区项目':
+                vehicles = [(vehicle_id, license_plate)]
+                self.process_new_urban_project_interface(vehicles, cursor)
+            else:
+                self.logger.warning(f"未知的项目类别 {project_category}，无法处理车辆 ID {vehicle_id}。")
+
+            connection.commit()
+            self.logger.info(f"成功处理车牌号 {license_plate} 的轨迹数据。")
+        except Exception as e:
+            self.log_error_details(f"根据车牌号 {license_plate} 获取或插入轨迹数据时出错: {e}")
+        finally:
+            cursor.close()
+            connection.close()
