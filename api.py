@@ -10,6 +10,7 @@ import threading
 from database_updater import main as start_all_trackers
 from vehicle_tracker import VehicleTracker
 from config import DB_CONFIG
+import requests
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
@@ -75,7 +76,7 @@ async def get_last_locations():
             SELECT 
                 id, license_plate, carId, vehicle_group, project_category, terminal_model, terminal_number,
                 brand_model, vehicle_identification_number, engine_number, owner, vehicle_name, gross_weight, 
-                vehicle_type, driver, driver_phone
+                vehicle_type, driver, driver_phone, car_no
             FROM VehicleInfo
         """)
         vehicles = await cursor.fetchall()
@@ -123,8 +124,8 @@ async def get_last_locations():
 # 处理单个车辆数据的异步函数
 async def handle_vehicle_data(vehicle, daily_data):
     (vehicle_id, license_plate, car_id, vehicle_group, project_category, terminal_model, terminal_number, \
-        brand_model, vehicle_identification_number, engine_number, owner, vehicle_name, gross_weight, vehicle_type,
-     driver, driver_phone) = vehicle
+     brand_model, vehicle_identification_number, engine_number, owner, vehicle_name, gross_weight, vehicle_type,
+     driver, driver_phone, car_no) = vehicle
 
     # 获取当天最后的轨迹信息
     track = await fetch_track_info(vehicle_id, daily_data)
@@ -154,6 +155,7 @@ async def handle_vehicle_data(vehicle, daily_data):
         'vehicle_type': vehicle_type,
         'driver': driver,
         'driver_phone': driver_phone,
+        'car_no': car_no,
     }
 
     return result
@@ -374,6 +376,7 @@ async def get_historical_data():
     start_date_str = request.args.get('startDate')
     end_date_str = request.args.get('endDate')
     companies_str = request.args.get('companies')
+    license_plates_str = request.args.get('licensePlates')
 
     # 验证参数是否存在
     if not start_date_str or not end_date_str or not companies_str:
@@ -394,52 +397,109 @@ async def get_historical_data():
     if not companies:
         return jsonify({"error": "At least one company must be specified"}), 400
 
+    # 解析license_plates
+    license_plates = [plate.strip() for plate in license_plates_str.split(',')] if license_plates_str else []
+
     connection = await connect_db()
     cursor = await connection.cursor()
 
     try:
-        # 使用单个SQL查询进行JOIN和聚合
-        # 查询 VehicleInfo 和 vehicle_daily_data，通过 project_category 过滤，并在日期范围内聚合
-        # 结果按 license_plate 和 project_category 分组
+        # 如果提供了车牌号，则查询每日数据
+        if license_plates:
+            # 构建IN查询的占位符
+            company_placeholders = ','.join(['%s'] * len(companies))
+            license_plate_placeholders = ','.join(['%s'] * len(license_plates))
+            params = [start_date, end_date, *companies, *license_plates]
 
-        # 构建IN查询的占位符
-        company_placeholders = ','.join(['%s'] * len(companies))
+            query = f"""
+                SELECT 
+                    vi.license_plate, 
+                    vi.project_category, 
+                    vi.driver,
+                    vi.driver_phone,
+                    vi.vehicle_type,
+                    vi.vehicle_name,
+                    vdd.date,
+                    COALESCE(vdd.running_mileage, 0) AS running_mileage,
+                    COALESCE(vdd.driving_duration, 0) AS driving_duration,
+                    COALESCE(vdd.parking_duration, 0) AS parking_duration,
+                    COALESCE(vdd.engine_off_duration, 0) AS engine_off_duration
+                FROM vehicleinfo vi
+                LEFT JOIN vehicle_daily_data vdd 
+                    ON vi.id = vdd.vehicle_id 
+                    AND vdd.date BETWEEN %s AND %s
+                WHERE vi.project_category IN ({company_placeholders})
+                AND vi.license_plate IN ({license_plate_placeholders})
+                ORDER BY vi.license_plate, vdd.date
+            """
 
-        query = f"""
-            SELECT 
-                vi.license_plate, 
-                vi.project_category, 
-                COALESCE(SUM(vdd.running_mileage), 0) AS total_running_mileage,
-                COALESCE(SUM(vdd.driving_duration), 0) AS total_driving_duration,
-                COALESCE(SUM(vdd.parking_duration), 0) AS total_parking_duration,
-                COALESCE(SUM(vdd.engine_off_duration), 0) AS total_engine_off_duration
-            FROM vehicleinfo vi
-            LEFT JOIN vehicle_daily_data vdd 
-                ON vi.id = vdd.vehicle_id 
-                AND vdd.date BETWEEN %s AND %s
-            WHERE vi.project_category IN ({company_placeholders})
-            GROUP BY vi.license_plate, vi.project_category
-            ORDER BY vi.license_plate, vi.project_category
-        """
+            await cursor.execute(query, params)
+            results = await cursor.fetchall()
 
+            # 构建响应数据
+            historical_data = []
+            for row in results:
+                license_plate, project_category, driver, driver_phone, vehicle_type, vehicle_name, date, running_mileage, driving_duration, parking_duration, engine_off_duration = row
+                historical_data.append({
+                    'license_plate': license_plate,
+                    'project_category': project_category,
+                    'driver': driver,
+                    'driver_phone': driver_phone,
+                    'vehicle_type': vehicle_type,
+                    'vehicle_name': vehicle_name,
+                    'date': date.strftime('%Y-%m-%d') if date else 'N/A',
+                    'running_mileage': float(running_mileage) if running_mileage else 0.0,
+                    'driving_duration': int(driving_duration) if driving_duration else 0,
+                    'parking_duration': int(parking_duration) if parking_duration else 0,
+                    'engine_off_duration': int(engine_off_duration) if engine_off_duration else 0
+                })
 
-        params = (start_date, end_date, *companies)
+        # 如果没有提供车牌号，则进行统计查询
+        else:
+            # 构建IN查询的占位符
+            company_placeholders = ','.join(['%s'] * len(companies))
+            params = [start_date, end_date, *companies]
 
-        await cursor.execute(query, params)
-        results = await cursor.fetchall()
+            query = f"""
+                SELECT 
+                    vi.license_plate, 
+                    vi.project_category, 
+                    vi.driver,
+                    vi.driver_phone,
+                    vi.vehicle_type,
+                    vi.vehicle_name,
+                    COALESCE(SUM(vdd.running_mileage), 0) AS total_running_mileage,
+                    COALESCE(SUM(vdd.driving_duration), 0) AS total_driving_duration,
+                    COALESCE(SUM(vdd.parking_duration), 0) AS total_parking_duration,
+                    COALESCE(SUM(vdd.engine_off_duration), 0) AS total_engine_off_duration
+                FROM vehicleinfo vi
+                LEFT JOIN vehicle_daily_data vdd 
+                    ON vi.id = vdd.vehicle_id 
+                    AND vdd.date BETWEEN %s AND %s
+                WHERE vi.project_category IN ({company_placeholders})
+                GROUP BY vi.license_plate, vi.project_category, vi.driver, vi.driver_phone, vi.vehicle_type, vi.vehicle_name
+                ORDER BY vi.license_plate, vi.project_category
+            """
 
-        # 构建响应数据
-        historical_data = []
-        for row in results:
-            license_plate, project_category, running_mileage, driving_duration, parking_duration, engine_off_duration = row
-            historical_data.append({
-                'license_plate': license_plate,
-                'project_category': project_category,
-                'running_mileage': float(running_mileage) if running_mileage else 0.0,
-                'driving_duration': int(driving_duration) if driving_duration else 0,
-                'parking_duration': int(parking_duration) if parking_duration else 0,
-                'engine_off_duration': int(engine_off_duration) if engine_off_duration else 0
-            })
+            await cursor.execute(query, params)
+            results = await cursor.fetchall()
+
+            # 构建响应数据
+            historical_data = []
+            for row in results:
+                license_plate, project_category, driver, driver_phone, vehicle_type, vehicle_name, running_mileage, driving_duration, parking_duration, engine_off_duration = row
+                historical_data.append({
+                    'license_plate': license_plate,
+                    'project_category': project_category,
+                    'driver': driver,
+                    'driver_phone': driver_phone,
+                    'vehicle_type': vehicle_type,
+                    'vehicle_name': vehicle_name,
+                    'running_mileage': float(running_mileage) if running_mileage else 0.0,
+                    'driving_duration': int(driving_duration) if driving_duration else 0,
+                    'parking_duration': int(parking_duration) if parking_duration else 0,
+                    'engine_off_duration': int(engine_off_duration) if engine_off_duration else 0
+                })
 
     except Exception as e:
         print(f"Error in get_historical_data: {e}")
@@ -450,6 +510,22 @@ async def get_historical_data():
         connection.close()
 
     return jsonify(historical_data)
+
+
+@app.route('/api/get_sessid', methods=['GET'])
+def get_sessid():
+    login_url = f'https://v.topevery.com/StandardApiAction_login.action?account=CYJDHYHW&password=CY@jdhw1024'
+    try:
+        response = requests.get(login_url)
+        data = response.json()
+        if data.get('result') == 0 and 'jsession' in data:
+            sessid = data['jsession']
+            return jsonify({'sessid': sessid})
+        else:
+            return jsonify({'error': 'Failed to get sessid', 'details': data}), 500
+    except Exception as e:
+        return jsonify({'error': 'Exception occurred', 'details': str(e)}), 500
+
 
 
 if __name__ == '__main__':
