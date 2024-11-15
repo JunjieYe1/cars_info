@@ -7,12 +7,13 @@ from datetime import datetime
 import json
 import logging
 from config import DB_CONFIG, SESSION_ID_OLD_URBAN, SESSION_ID_NEW_URBAN, API_URLS, MAX_CONCURRENT_REQUESTS
-import math
+from session_manager import SessionManager
 
 class DailyDataTracker:
     def __init__(self, loop_interval=60):
         self.loop_interval = loop_interval  # 循环间隔时间（分钟）
         self.semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+        self.session_manager = SessionManager()
 
         # 配置日志
         logging.basicConfig(
@@ -198,7 +199,7 @@ class DailyDataTracker:
                     "userName": "ahhygs",
                     "password": "123456",
                     "vehicleNo": license_plate,
-                    "sessionId": SESSION_ID_NEW_URBAN
+                    "sessionId": self.session_manager.get_session_id()
                 }
                 async with session.post(
                     API_URLS['new_urban_count_post'],
@@ -223,7 +224,7 @@ class DailyDataTracker:
         """获取所有车辆的状态数据"""
         tasks = [
             self.fetch_status_data_old_urban(session, SESSION_ID_OLD_URBAN, start_time, end_time),
-            self.fetch_status_data_new_urban(session, SESSION_ID_NEW_URBAN)
+            self.fetch_status_data_new_urban(session, self.session_manager.get_session_id())
         ]
         results = await asyncio.gather(*tasks)
         combined_status = {**results[0], **results[1]}

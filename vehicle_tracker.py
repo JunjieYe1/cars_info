@@ -9,7 +9,9 @@ import schedule
 import logging
 from dbutils.pooled_db import PooledDB
 import math
-from config import DB_CONFIG, SESSION_ID_OLD_URBAN, API_URLS, LOG_FILE_TRACKER
+from config import DB_CONFIG, SESSION_ID_OLD_URBAN, API_URLS, LOG_FILE_TRACKER, SESSION_ID_NEW_URBAN
+from session_manager import SessionManager
+from datetime import datetime, timedelta
 
 class VehicleTracker:
     def __init__(self, loop_interval=5):
@@ -19,6 +21,7 @@ class VehicleTracker:
         # 创建日志记录器
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.INFO)  # 设置日志级别
+        self.session_manager = SessionManager()
 
         # 创建文件处理器
         file_handler = logging.FileHandler(LOG_FILE_TRACKER)
@@ -55,7 +58,6 @@ class VehicleTracker:
 
         # 新城区项目接口设置
         self.new_urban_base_url = "http://220.178.1.18:8542/GPSBaseserver/stdHisAlarm/getHisGPS.do"
-        self.new_urban_session_id = "57c7ccea-5e8c-493a-8ac8-db8598deadac-02333474"
 
         # 配置连接池
         self.pool = PooledDB(
@@ -108,6 +110,27 @@ class VehicleTracker:
         mglat = lat + dlat
         mglng = lng + dlng
         return mglng, mglat
+
+    def delete_old_track_data(self):
+        """
+        删除三个月前的轨迹数据。
+        这个函数会在每次循环前调用，确保删除旧数据。
+        """
+        connection = self.pool.connection()
+        cursor = connection.cursor()
+        try:
+            three_months_ago = datetime.now() - timedelta(days=90)
+            delete_query = """
+            DELETE FROM VehicleTrack
+            WHERE track_time < %s
+            """
+            cursor.execute(delete_query, (three_months_ago,))
+            logging.info(f"成功删除三个月前的轨迹数据，删除日期: {three_months_ago.strftime('%Y-%m-%d')}")
+        except Exception as e:
+            logging.error(f"删除三个月前轨迹数据时出错: {e}")
+        finally:
+            cursor.close()
+            connection.close()
 
     def get_last_update_time(self, cursor, vehicle_id):
         cursor.execute("SELECT MAX(track_time) FROM VehicleTrack WHERE vehicle_id = %s", (vehicle_id,))
@@ -299,7 +322,7 @@ class VehicleTracker:
                 "beginTime": start_time.strftime('%Y-%m-%d %H:%M:%S'),
                 "endTime": end_time.strftime('%Y-%m-%d %H:%M:%S'),
                 "vehicleNum": license_plate,
-                "sessionId": self.new_urban_session_id
+                "sessionId": self.session_manager.get_session_id()
             }
 
             try:
@@ -342,6 +365,9 @@ class VehicleTracker:
     def start(self):
         # 立即运行一次
         self.fetch_and_store_vehicle_tracks()
+
+        # 删除三个月前的轨迹数据
+        self.delete_old_track_data()
 
         # 定时任务，每 loop_interval 分钟执行一次
         schedule.every(self.loop_interval).minutes.do(self.fetch_and_store_vehicle_tracks)

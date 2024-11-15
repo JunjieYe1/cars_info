@@ -1,3 +1,5 @@
+import time
+
 from flask import Flask, jsonify, request
 import aiomysql
 from datetime import datetime, timedelta
@@ -11,6 +13,7 @@ from database_updater import main as start_all_trackers
 from vehicle_tracker import VehicleTracker
 from config import DB_CONFIG
 import requests
+from session_manager import SessionManager
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
@@ -30,6 +33,9 @@ else:
         'db': 'Cars'
     }
 
+# 实例化 SessionManager
+session_manager = SessionManager()
+
 
 async def connect_db():
     return await aiomysql.connect(**db_config)
@@ -42,6 +48,22 @@ def make_cache_key():
 
 # 实例化 VehicleTracker
 vehicle_tracker = VehicleTracker(loop_interval=5)  # 根据需要调整循环间隔时间
+
+
+# 启动 SessionManager 的异步任务
+def start_session_manager():
+    print("Starting SessionManager...")
+    while True:
+        session_id = session_manager.get_session_id()
+        print(f"当前 session_id: {session_id}")
+        # 每10小时刷新一次
+        time.sleep(36000)  # 10小时 = 36000秒
+
+def start_async_task():
+    # 在后台线程中运行异步任务
+    loop = asyncio.new_event_loop()  # 为线程创建一个新的事件循环
+    asyncio.set_event_loop(loop)  # 设置当前线程的事件循环
+    loop.run_until_complete(start_session_manager())  # 启动异步任务
 
 
 @app.route('/api/last_locations', methods=['GET'])
@@ -527,11 +549,14 @@ def get_sessid():
         return jsonify({'error': 'Exception occurred', 'details': str(e)}), 500
 
 
-
 if __name__ == '__main__':
     # 启动数据库更新器（跟踪器）线程
     tracker_thread = threading.Thread(target=start_all_trackers)
     tracker_thread.start()
+
+    # 启动异步任务：启动 SessionManager
+    async_task_thread = threading.Thread(target=start_async_task)
+    async_task_thread.start()
 
     # 启动 API 服务
     app.run(debug=False, host='0.0.0.0', port=8011)
