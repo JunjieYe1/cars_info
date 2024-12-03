@@ -14,6 +14,7 @@ class DailyDataTracker:
         self.loop_interval = loop_interval  # 循环间隔时间（分钟）
         self.semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
         self.session_manager = SessionManager()
+        self.tracker_ids = []
 
         # 配置日志
         logging.basicConfig(
@@ -162,6 +163,7 @@ class DailyDataTracker:
             try:
                 if not license_plate:
                     return {}
+
                 params = {
                     'vehicleNo': license_plate,
                     'startTime': start_time,
@@ -180,9 +182,12 @@ class DailyDataTracker:
                         return {}
                     data_list = data["data"]["dataList"]
                     if len(data_list) > 2:
-                        mile = round((self.safe_convert(data_list[-1].get("deviceMileage"), float, 0.0) -
-                                      self.safe_convert(data_list[0].get("deviceMileage"), float, 0.0)) / 1000, 2)
+                        # mile = round((self.safe_convert(data_list[-1].get("deviceMileage"), float, 0.0) -
+                        #               self.safe_convert(data_list[0].get("deviceMileage"), float, 0.0)) / 1000, 2)
+                        mile = round((self.safe_convert(data_list[-1].get("platformMileage"), float, 0.0) -
+                                       self.safe_convert(data_list[0].get("platformMileage"), float, 0.0)) / 1000, 2)
                         move_long = self.safe_convert(data_list[-1].get('driveTimeLen'), int, 0)
+
                         return {"mile": mile, "move_long": move_long}
                     return {}
             except Exception as e:
@@ -197,7 +202,7 @@ class DailyDataTracker:
                     return {}
                 payload = {
                     "userName": "ahhygs",
-                    "password": "123456",
+                    "password": "Hyhw240720@hy",
                     "vehicleNo": license_plate,
                     "sessionId": self.session_manager.get_session_id()
                 }
@@ -241,6 +246,17 @@ class DailyDataTracker:
             """)
             vehicles = await cursor.fetchall()
         return vehicles
+
+    async def fetch_vehicle_tracker(self, connection):
+        """从数据库获取所有车辆信息"""
+        async with connection.cursor() as cursor:
+            await cursor.execute("""
+                SELECT DISTINCT vehicle_id
+                FROM vehicletrack
+                WHERE DATE(track_time) = CURDATE();
+            """)
+            vehicles = await cursor.fetchall()
+        return [vehicle[0] for vehicle in vehicles]
 
     async def insert_daily_data(self, connection, daily_data):
         """将每日数据插入到数据库中"""
@@ -294,7 +310,7 @@ class DailyDataTracker:
             driving_duration = self.safe_convert(count_data.get('move_long', 0), int, 0)
 
             # 根据 mile 设置状态
-            status = 1 if mile > 0 else 0
+            status = 1 if vehicle_id in self.tracker_ids else 0
 
         elif project_category == "渣土项目" and license_plate:
             # 处理渣土项目
@@ -302,7 +318,7 @@ class DailyDataTracker:
             driving_duration = self.safe_convert(count_data.get('move_long', 0), int, 0)
 
             # 根据 mile 设置状态
-            status = 1 if mile > 0 else 0
+            status = 1 if vehicle_id in self.tracker_ids else 0
 
         elif project_category == "新城区项目" and license_plate:
             # 处理新城区项目
@@ -343,6 +359,8 @@ class DailyDataTracker:
         try:
             # 获取所有车辆信息
             vehicles = await self.fetch_vehicle_info(connection)
+            self.tracker_ids = await self.fetch_vehicle_tracker(connection)
+
 
             async with aiohttp.ClientSession() as session:
                 # 获取当前日期

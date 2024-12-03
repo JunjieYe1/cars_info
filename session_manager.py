@@ -9,7 +9,7 @@ class SessionManager:
     def __init__(self, file_path="session_data.json"):
         self.session_url = 'http://220.178.1.18:8542/GPSBaseserver/shiro/login.do'
         self.username = 'ahhygs'
-        self.password = "123456"
+        self.password = "Hyhw240720@hy"
         self.file_path = file_path
 
     def get_session_id(self):

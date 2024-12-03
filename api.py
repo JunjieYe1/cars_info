@@ -378,7 +378,7 @@ async def get_video_url():
                     'http://220.178.1.18:8542/GPSBaseserver/videoUrlProvider/getVideoUrl.do',
                     json={
                         "userName": "ahhygs",
-                        "password": "123456",
+                        "password": "Hyhw240720@hy",
                         "vehicleNum": vehicle_num,
                         "sessionId": "57c7ccea-5e8c-493a-8ac8-db8598deadac-02333474"
                     }
