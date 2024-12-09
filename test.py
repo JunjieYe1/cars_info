@@ -57,4 +57,4 @@ session.close()
 
 
 # SELECT user, host FROM mysql.user;
-# UPDATE mysql.user SET host = '125.120.156.73' WHERE user = 'yjj' AND host = '122.235.191.249'; FLUSH PRIVILEGES;SELECT user, host FROM mysql.user;
+# UPDATE mysql.user SET host = '183.129.110.15' WHERE user = 'yjj' AND host = '125.121.187.69'; FLUSH PRIVILEGES;SELECT user, host FROM mysql.user;

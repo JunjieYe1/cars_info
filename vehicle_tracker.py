@@ -167,6 +167,11 @@ class VehicleTracker:
             urban_vehicles = cursor.fetchall()
             self.process_new_urban_project_interface(urban_vehicles, cursor)
 
+            # 处理人员轨迹数据（华邺）
+            cursor.execute("SELECT PersonnelID, BadgeNumber FROM personnel WHERE Company = '华邺'")
+            urban_personnel = cursor.fetchall()
+            self.process_new_urban_project_interface(urban_personnel, cursor)
+
             connection.commit()
         except Exception as e:
             self.log_error_details(f"获取或插入轨迹数据时出错: {e}")
@@ -379,7 +384,7 @@ class VehicleTracker:
         except KeyboardInterrupt:
             logging.info("程序终止")
 
-    def fetch_track_by_license_plate(self, license_plate):
+    def fetch_track_by_license_plate(self, license_plate, person = False):
         """
         根据单一车牌号查询车辆轨迹并更新数据库。
 
@@ -389,10 +394,16 @@ class VehicleTracker:
         cursor = connection.cursor()
         try:
             # 根据车牌号查找车辆信息
-            cursor.execute(
-                "SELECT id, project_category, carId, license_plate FROM VehicleInfo WHERE license_plate = %s",
-                (license_plate,)
-            )
+            if person:
+                cursor.execute(
+                    "SELECT Company, PersonnelID, BadgeNumber FROM personnel WHERE BadgeNumber = %s",
+                    (license_plate,)
+                )
+            else:
+                cursor.execute(
+                    "SELECT id, project_category, carId, license_plate FROM VehicleInfo WHERE license_plate = %s",
+                    (license_plate,)
+                )
             vehicle = cursor.fetchone()
             if not vehicle:
                 self.logger.warning(f"没有找到车牌号为 {license_plate} 的车辆信息。")
@@ -401,7 +412,12 @@ class VehicleTracker:
             vehicle_id, project_category, car_id, license_plate = vehicle
 
             # 根据项目类别选择处理函数
-            if project_category == '老城区环卫':
+            if person:
+                Company, PersonnelID, BadgeNumber = vehicle
+                urban_personnel = [(PersonnelID, BadgeNumber)]
+                self.process_new_urban_project_interface(urban_personnel, cursor)
+
+            elif project_category == '老城区环卫':
                 if car_id:
                     vehicles = [(vehicle_id, car_id)]
                     self.process_old_interface(vehicles, cursor)

@@ -143,6 +143,81 @@ async def get_last_locations():
     return jsonify(results)
 
 
+@app.route('/api/last_locations_person', methods=['GET'])
+@cache.cached(timeout=5, key_prefix=make_cache_key)
+async def get_last_locations_person():
+    date_str = request.args.get('date')
+    license_plate = request.args.get('license_plate')
+
+    if not date_str:
+        return jsonify({"error": "Date parameter is required"}), 400
+
+    try:
+        date = datetime.strptime(date_str, '%Y%m%d').date()
+    except ValueError:
+        return jsonify({"error": "Invalid date format, expected YYYYMMDD"}), 400
+
+    # 如果提供了车牌号，调用 VehicleTracker 来更新该车辆的轨迹
+    if license_plate:
+        try:
+            # 使用 asyncio.to_thread 来在后台线程中运行同步方法
+            await asyncio.to_thread(vehicle_tracker.fetch_track_by_license_plate, license_plate, True)
+            print(f"Successfully updated track for license plate: {license_plate}")
+        except Exception as e:
+            print(f"Error updating track for license plate {license_plate}: {e}")
+
+    connection = await connect_db()
+    cursor = await connection.cursor()
+
+    try:
+        # 查询所有车辆信息
+        await cursor.execute("""
+            SELECT Company, PersonnelID, BadgeNumber, Name, Gender, Age, PhoneNumber, Position, HomeAddress  FROM personnel
+        """)
+        vehicles = await cursor.fetchall()
+
+        if not vehicles:
+            return jsonify({"error": "No vehicles found"}), 404
+
+        vehicle_ids = [vehicle[1] for vehicle in vehicles]
+
+        # 构建IN查询的占位符
+        in_placeholders = ','.join(['%s'] * len(vehicle_ids))
+
+        # 查询vehicle_daily_data表中的数据
+        await cursor.execute(f"""
+            SELECT vehicle_id, running_mileage, driving_duration, parking_duration, engine_off_duration, current_status
+            FROM vehicle_daily_data
+            WHERE vehicle_id IN ({in_placeholders}) AND date = %s
+        """, (*vehicle_ids, date))
+        daily_data = await cursor.fetchall()
+
+        # 构建vehicle_id到daily_data的映射
+        daily_data_dict = {row[0]: {
+            'running_mileage': float(row[1]),
+            'driving_duration': row[2],
+            'parking_duration': row[3],
+            'engine_off_duration': row[4],
+            'current_status': row[5]
+        } for row in daily_data}
+
+
+        # 创建异步任务处理每辆车的数据
+        tasks = [handle_person_data(vehicle, daily_data_dict.get(vehicle[1])) for vehicle in vehicles]
+        results = await asyncio.gather(*tasks)
+
+    except Exception as e:
+        print(f"Error in get_last_locations: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+    finally:
+        await cursor.close()
+        connection.close()
+
+    return jsonify(results)
+
+
+
 # 处理单个车辆数据的异步函数
 async def handle_vehicle_data(vehicle, daily_data):
     (vehicle_id, license_plate, car_id, vehicle_group, project_category, terminal_model, terminal_number, \
@@ -182,6 +257,35 @@ async def handle_vehicle_data(vehicle, daily_data):
 
     return result
 
+# 处理单个车辆数据的异步函数
+async def handle_person_data(person, daily_data):
+    (Company, PersonnelID, BadgeNumber, Name, Gender, Age, PhoneNumber, Position, HomeAddress) = person
+
+    # 获取当天最后的轨迹信息
+    track = await fetch_track_info(PersonnelID, daily_data)
+
+    # 初始化返回数据
+    result = {
+        'id': PersonnelID,
+        'license_plate': BadgeNumber,
+        'status': daily_data['current_status'] if daily_data and daily_data['current_status'] > 0 else 0,
+        'latitude': track['latitude'],
+        'longitude': track['longitude'],
+        'last_time': track['last_time'],
+        'move_long': format_duration(daily_data['driving_duration']) if daily_data else 'N/A',
+        'move_long_num': daily_data['driving_duration'] if daily_data else 'N/A',
+        'mile': daily_data['running_mileage'] if daily_data else 'N/A',
+        'person_name': Name,
+        'person_phone': PhoneNumber,
+        'Age': Age,
+        'Gender': Gender,
+        'Position': Position,
+        'HomeAddress': HomeAddress,
+        'Company': Company,
+
+    }
+
+    return result
 
 # 格式化持续时间为 "HH时MM分SS秒"
 def format_duration(seconds):

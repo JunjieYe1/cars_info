@@ -8,7 +8,7 @@ from config import LOG_FILE_TRACKER, LOG_FILE_DAILY
 
 def start_vehicle_tracker():
     """启动 VehicleTracker"""
-    tracker = VehicleTracker(loop_interval=2)  # 设定循环间隔，例如每5分钟执行一次
+    tracker = VehicleTracker(loop_interval=5)  # 设定循环间隔，例如每5分钟执行一次
     tracker.start()
 
 def start_daily_data_tracker():

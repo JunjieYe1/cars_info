@@ -247,6 +247,15 @@ class DailyDataTracker:
             vehicles = await cursor.fetchall()
         return vehicles
 
+    async def fetch_person_info(self, connection):
+        """从数据库获取所有人员信息"""
+        async with connection.cursor() as cursor:
+            await cursor.execute("""
+                SELECT Company, PersonnelID, BadgeNumber FROM personnel
+            """)
+            vehicles = await cursor.fetchall()
+        return vehicles
+
     async def fetch_vehicle_tracker(self, connection):
         """从数据库获取所有车辆信息"""
         async with connection.cursor() as cursor:
@@ -280,6 +289,27 @@ class DailyDataTracker:
             await cursor.executemany(insert_query, daily_data)
         await connection.commit()
         self.logger.info(f"Successfully inserted daily data for {len(daily_data)} vehicles.")
+
+    async def process_person_data(self, vehicle_id, license_plate, count_data, status_data, today):
+
+
+        mile = self.safe_convert(count_data.get('mile', '0.0'), float, 0.0) / 10
+        driving_duration = self.safe_convert(count_data.get('move_long', 0), int, 0)
+        parking_duration = self.safe_convert(count_data.get('stop_long', 0), int, 0)
+        engine_off_duration = self.safe_convert(count_data.get('engine_off_long', 0), int, 0)
+
+        # 获取状态
+        status = status_data.get(license_plate, -1)
+        return (
+            vehicle_id,
+            license_plate,
+            today,
+            mile,
+            driving_duration,
+            parking_duration,
+            engine_off_duration,
+            status  # 添加当前状态
+        )
 
     async def process_vehicle_data(self, vehicle, count_data, status_data, today):
         """处理单个车辆的数据，返回每日数据元组或 None"""
@@ -359,6 +389,7 @@ class DailyDataTracker:
         try:
             # 获取所有车辆信息
             vehicles = await self.fetch_vehicle_info(connection)
+            persons = await self.fetch_person_info(connection)
             self.tracker_ids = await self.fetch_vehicle_tracker(connection)
 
 
@@ -375,6 +406,7 @@ class DailyDataTracker:
 
                 daily_data = []
                 tasks = []
+                p_tasks = []
 
                 for vehicle in vehicles:
                     vehicle_id, license_plate, car_id, vehicle_group, project_category, terminal_model, terminal_number, \
@@ -400,8 +432,16 @@ class DailyDataTracker:
                     else:
                         tasks.append(asyncio.sleep(0, result={}))
 
+                for p in persons:
+                    Company, PersonnelID, BadgeNumber = p
+                    p_tasks.append(
+                        self.fetch_count_data_new_urban(session, BadgeNumber, start_time_iso, end_time_iso)
+                    )
+
+
                 # 并发执行所有数据获取任务
                 count_results = await asyncio.gather(*tasks)
+                p_count_results = await asyncio.gather(*p_tasks)
 
                 # 处理每辆车的数据
                 for vehicle, count_data in zip(vehicles, count_results):
@@ -412,6 +452,14 @@ class DailyDataTracker:
                     processed_data = await self.process_vehicle_data(vehicle, count_data, status_data, today)
                     if processed_data:
                         # print(processed_data)
+                        daily_data.append(processed_data)
+
+                for p, count_data in zip(persons, p_count_results):
+                    Company, vehicle_id, license_plate = p
+                    if not count_data:
+                        continue
+                    processed_data = await self.process_person_data(vehicle_id, license_plate, count_data, status_data, today)
+                    if processed_data:
                         daily_data.append(processed_data)
 
                 # 插入数据到数据库
@@ -433,6 +481,12 @@ class DailyDataTracker:
     def start(self):
         """启动异步任务"""
         try:
+            print("Starting DailyDataTracker...")
             asyncio.run(self.run())
         except KeyboardInterrupt:
             self.logger.info("DailyDataTracker 程序终止")
+
+
+if __name__ == '__main__':
+    daily_data_tracker = DailyDataTracker(loop_interval=1)
+    daily_data_tracker.start()
